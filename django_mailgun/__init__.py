@@ -58,7 +58,8 @@ class MailgunBackend(BaseEmailBackend):
                            "from": from_email,
                         },
                     files={
-                           "message": StringIO(email_message.message().as_string()),
+                           "message": StringIO(
+                               email_message.message().as_bytes(linesep="\r\n"))
                         }
                     )
         except requests.exceptions.RequestException as e:

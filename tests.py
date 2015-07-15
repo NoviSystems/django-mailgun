@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import unittest
 from contextlib import contextmanager
 try:
@@ -6,7 +7,7 @@ except ImportError:
     import urllib.parse as urlparse
 from cgi import parse_multipart, parse_header
 import io
-import email, email.message
+import email, email.message, email.header
 import base64
 import smtplib
 
@@ -14,6 +15,7 @@ import django.conf
 from django.core.mail import send_mail, send_mass_mail
 from django.test.utils import override_settings
 from django.core.exceptions import ImproperlyConfigured
+import django.utils.six as six
 
 import httmock
 
@@ -101,12 +103,20 @@ class TestMailgun(unittest.TestCase):
             assert isinstance(url, urlparse.SplitResult)
 
             # Note: request header keys and values will be in the native
-            # string type, while the request body will be a byte string.
+            # string type, while the request body will be a byte string in
+            # both PY2 and PY3.
 
-            # cgi.parse_header() expects a native string type
+            # cgi.parse_header() expects a native string type and returns
+            # native string types
             # cgi.parse_multipart() expects a byte string
 
-            # This means we have to (re)encode any
+            # This means we have to (re)encode the boundary string (which
+            # comes from parse_header) in order to pass them into the
+            # second parameter of parse_multipart() on python 3
+
+            # parse_multipart returns byte strings as parameters, as well.
+            # They will need to be decoded manually for strict checking on
+            # python 3.
 
             # Check the url is correct
             self.assertEqual(url.scheme, "https")
@@ -127,30 +137,73 @@ class TestMailgun(unittest.TestCase):
             # key as the password
             enc = base64.b64encode("api:{}".format(
                 django.conf.settings.MAILGUN_ACCESS_KEY
-            ))
+            ).encode("ascii")).decode("ascii")
             self.assertEqual(request.headers['Authorization'],
                              "Basic " + enc)
 
-            # Parse the parts of the multipart/form-data body
+            # Parse the parts of the multipart/form-data body.
+            # the boundary needs to be a byte string on python 3 for
+            # parse_multipart to work.
+            params['boundary'] = params['boundary'].encode("ascii")
             parts = parse_multipart(io.BytesIO(request.body), params)
 
             # Now check the form fields. Refer to the MailGun API docs at
             # https://documentation.mailgun.com/api-sending.html#sending
-            self.assertEqual(parts['to'], [tofield])
 
-            # Parse the MIME content to see if it looks like the email we
-            # tried to send
-            m = email.message_from_string(parts['message'][0])
+            # fields parsed from the multipart/form-data request are byte
+            # strings. They need to be decoded to compare to the expected
+            # values in python 3
+            # TODO: is this the right encoding to use? Should it go by the
+            # request's charset? OR can each field in a multipart/form-data
+            # have its own encoding?
+            self.assertEqual(parts['to'][0].decode("ascii"), tofield)
+
+            # Now to parse the "message" part of the request, which should be
+            # in MIME format representing the email to send
+            if six.PY3:
+                m = email.message_from_bytes(parts['message'][0])
+            else:
+                m = email.message_from_string(parts['message'][0])
             assert isinstance(m, email.message.Message)
-            self.assertEqual(m['From'], fromfield)
-            self.assertEqual(m['To'], tofield)
-            self.assertEqual(m['Subject'], subject)
+
+            # We now have an email.message.Message object
+
+            # The header fields of the message are native strings on both PY2
+            # and PY3, however, non ASCII characters in a header field will
+            # cause the field to be encoded with an RFC 2047 style encoding
+            # that we'll need to process manually.
+
+            # PY3 decodes the payload properly to a unicode string if
+            # Content-Transfer-Encoding is 8bit and there is a charset
+            # specified [0], but the PY2 payload gives us a byte string. We'll
+            # need to decode it ourself.
+
+            # [0] https://docs.python.org/3/library/email.message.html#email.message.Message.get_payload
+
+            # First, the headers:
+            def decode_header(h):
+                decodedbytes, charset = email.header.decode_header(h)[0]
+                if charset is None:
+                    return decodedbytes
+                return decodedbytes.decode(charset)
+            msgfrom = decode_header(m['From'])
+            msgto = decode_header(m['To'])
+            msgsubject = decode_header(m['Subject'])
+
+            self.assertEqual(msgfrom, fromfield)
+            self.assertEqual(msgto, tofield)
+            self.assertEqual(msgsubject, subject)
 
             if html is None:
                 # A plain text message should be the entirety of the body; an
                 # HTML message the body is mixed type
                 self.assertFalse(m.is_multipart())
-                self.assertEqual(m.get_payload(), body)
+                payload = m.get_payload()
+                if six.PY2:
+                    # Python 2 doesn't decode the payload for us. So we need
+                    # to do that manually
+                    payload = payload.decode(m.get_param("charset", "ascii"))
+                self.assertEqual(payload, body)
             else:
                 self.assertTrue(m.is_multipart())
                 messages = m.get_payload()
@@ -160,6 +213,9 @@ class TestMailgun(unittest.TestCase):
                 if parse_header(messages[0]['Content-Type'])[0] != \
                         "text/plain":
                     messages[0], messages[1] = messages[1], messages[0]
+
+                # At this point the first message should be the text/plain
+                # message, and the second the html message
 
                 contenttype, params = parse_header(messages[0]['Content-Type'])
                 self.assertEqual(contenttype, "text/plain")
@@ -248,3 +304,17 @@ class TestMailgun(unittest.TestCase):
         ]
         with self.expect(expects):
             send_mass_mail(messages)
+
+    def test_unicode_body(self):
+
+        with self.expect([self._make_checker(
+                "A subject", u"ŭñíçøḑĘ", "from@email", "to@email",
+        )]):
+            send_mail("A subject", u"ŭñíçøḑĘ", "from@email", ["to@email"])
+
+    def test_unicode_subject(self):
+
+        with self.expect([self._make_checker(
+                u"ŭñíçøḑĘ", "message body", "from@email", "to@email",
+        )]):
+            send_mail(u"ŭñíçøḑĘ", "message body", "from@email", ["to@email"])
