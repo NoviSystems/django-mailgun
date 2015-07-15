@@ -1,19 +1,15 @@
 import smtplib
-import requests
-import requests.exceptions
+
 from django.conf import settings
 from django.core.mail.backends.base import BaseEmailBackend
 from django.core.mail.message import sanitize_address
 import django.utils.six as six
 from django.core.exceptions import ImproperlyConfigured
 
-try:
-    from io import StringIO
-except ImportError:
-    try:
-        from cStringIO import StringIO
-    except ImportError:
-        from StringIO import StringIO
+import requests
+import requests.exceptions
+
+StringIO = six.BytesIO
 
 class MailgunBackend(BaseEmailBackend):
     """A Django Email backend that uses mailgun.
@@ -54,17 +50,17 @@ class MailgunBackend(BaseEmailBackend):
                       for addr in email_message.recipients()]
 
         try:
-            r = requests.\
-                post(self._api_url + "messages.mime",
-                     auth=("api", self._access_key),
-                     data={
-                            "to": ", ".join(recipients),
-                            "from": from_email,
-                         },
-                     files={
-                            "message": StringIO(unicode(email_message.message().as_string(), errors="ignore")),
-                         }
-                     )
+            r = requests.post(
+                    self._api_url + "messages.mime",
+                    auth=("api", self._access_key),
+                    data={
+                           "to": ", ".join(recipients),
+                           "from": from_email,
+                        },
+                    files={
+                           "message": StringIO(email_message.message().as_string()),
+                        }
+                    )
         except requests.exceptions.RequestException as e:
             if not self.fail_silently:
                 six.raise_from(smtplib.SMTPException("Could not send mail"),
