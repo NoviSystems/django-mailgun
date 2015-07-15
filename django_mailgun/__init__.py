@@ -1,7 +1,11 @@
+import smtplib
 import requests
+import requests.exceptions
 from django.conf import settings
 from django.core.mail.backends.base import BaseEmailBackend
 from django.core.mail.message import sanitize_address
+import django.utils.six as six
+from django.core.exceptions import ImproperlyConfigured
 
 try:
     from io import StringIO
@@ -10,9 +14,6 @@ except ImportError:
         from cStringIO import StringIO
     except ImportError:
         from StringIO import StringIO
-
-class MailgunAPIError(Exception):
-    pass
 
 class MailgunBackend(BaseEmailBackend):
     """A Django Email backend that uses mailgun.
@@ -29,11 +30,8 @@ class MailgunBackend(BaseEmailBackend):
         try:
             self._access_key = access_key or getattr(settings, 'MAILGUN_ACCESS_KEY')
             self._server_name = server_name or getattr(settings, 'MAILGUN_SERVER_NAME')
-        except AttributeError:
-            if fail_silently:
-                self._access_key, self._server_name = None, None
-            else:
-                raise
+        except AttributeError as e:
+            six.raise_from(ImproperlyConfigured(*e.args), e)
 
         self._api_url = "https://api.mailgun.net/v3/%s/" % self._server_name
 
@@ -67,14 +65,16 @@ class MailgunBackend(BaseEmailBackend):
                             "message": StringIO(unicode(email_message.message().as_string(), errors="ignore")),
                          }
                      )
-        except:
+        except requests.exceptions.RequestException as e:
             if not self.fail_silently:
-                raise
+                six.raise_from(smtplib.SMTPException("Could not send mail"),
+                               e)
             return False
 
         if r.status_code != 200:
             if not self.fail_silently:
-                raise MailgunAPIError(r)
+                raise smtplib.SMTPException("Mailgun server returned code {"
+                                            "}".format(r.status_code))
             return False
 
         return True
