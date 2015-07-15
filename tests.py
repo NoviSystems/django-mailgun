@@ -111,7 +111,7 @@ class TestMailgun(unittest.TestCase):
             # Check the url is correct
             self.assertEqual(url.scheme, "https")
             self.assertEqual(url.netloc, "api.mailgun.net")
-            self.assertEqual(url.path, "/v2/{}/messages.mime".format(
+            self.assertEqual(url.path, "/v3/{}/messages.mime".format(
                 django.conf.settings.MAILGUN_SERVER_NAME
             ))
             # Other components of the request url should be blank
