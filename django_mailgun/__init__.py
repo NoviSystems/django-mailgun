@@ -15,13 +15,11 @@ class MailgunBackend(BaseEmailBackend):
     """A Django Email backend that uses mailgun.
     """
 
-    def __init__(self, fail_silently=False, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         access_key, server_name = (kwargs.pop('access_key', None),
                                    kwargs.pop('server_name', None))
     
-        super(MailgunBackend, self).__init__(
-                        fail_silently=fail_silently, 
-                        *args, **kwargs)
+        super(MailgunBackend, self).__init__(*args, **kwargs)
 
         try:
             self._access_key = access_key or getattr(settings, 'MAILGUN_ACCESS_KEY')
