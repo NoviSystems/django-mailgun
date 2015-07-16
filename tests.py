@@ -21,6 +21,9 @@ import httmock
 
 import requests
 
+if six.PY3:
+    import email.policy
+
 django.conf.settings.configure(
     EMAIL_BACKEND = 'django_mailgun.MailgunBackend',
     MAILGUN_ACCESS_KEY = 'ACCESS-KEY',
@@ -62,9 +65,16 @@ class TestMailgun(unittest.TestCase):
         """Returns a context manager that will expect an API request to be sent
         through the requests library before the context exits.
 
-        The request is parsed as a multipart/form-data request to the mailgun
-        API. The parts of the body are passed as a dictionary to the given
-        checker function, which should check that the request looks okay.
+        Takes a list of "checker" functions. Each checker function will take
+        the SplitResult url object and PreparedRequest object, and check if
+        the request matches some parameters. If it doesn't, it should raise
+        an AssertionError. Otherwise, it should return without error.
+
+        The number of requests we see should exactly match the number of
+        checkers given, and each request should match at least one checker
+        (but a checker may only be used once. This means that if a request
+        matches 2 checkers but another request only matches one, then the
+        order is important)
 
         :type checkers: list
         """
@@ -142,7 +152,7 @@ class TestMailgun(unittest.TestCase):
                              "Basic " + enc)
 
             # Parse the parts of the multipart/form-data body.
-            # the boundary needs to be a byte string on python 3 for
+            # The boundary needs to be a byte string on python 3 for
             # parse_multipart to work.
             params['boundary'] = params['boundary'].encode("ascii")
             parts = parse_multipart(io.BytesIO(request.body), params)
@@ -150,16 +160,34 @@ class TestMailgun(unittest.TestCase):
             # Now check the form fields. Refer to the MailGun API docs at
             # https://documentation.mailgun.com/api-sending.html#sending
 
-            # Fields parsed from the multipart/form-data request are byte
-            # strings. They need to be decoded to compare to the expected
-            # values in python 3. Unicode characters are encoded with RFC
-            # 2047 style encoding, which we decode with this function:
+            # Fields parsed from the multipart/form-data request are ASCII byte
+            # strings. Further, unicode characters are encoded with RFC
+            # 2047 style encoding, the same as MIME headers. We need to
+            # decode these fields ourself because parse_multipart() doesn't
+            # do it. The email.header.decode_header() function does exactly
+            # this.
+            # Unfortunately, due to a Python bug (issue22833),
+            # the decode_header() function may return bytes or a str
+            # depending on its input, so we need to hack around that and
+            # check the result to get it to a proper unicode string, or tests
+            # will fail on Python 3.
             def decode_header(h):
-                return " ".join(
-                    decodedbytes.decode(charset)
-                    if charset is not None else decodedbytes
-                    for decodedbytes, charset in email.header.decode_header(h)
-                )
+                """Returns a single unicode string from the passed-in RFC
+                2047 encoded header.
+
+                :param h: A (unicode) string
+
+                """
+                parts = []
+                for decodedbytes, charset in email.header.decode_header(h):
+                    decodedbytes = decodedbytes.strip()
+                    if isinstance(decodedbytes, six.text_type):
+                        decodedbytes = decodedbytes.encode("ascii")
+                    if charset is None:
+                        parts.append(decodedbytes.decode("ascii"))
+                    else:
+                        parts.append(decodedbytes.decode(charset))
+                return " ".join(parts)
             self.assertEqual(
                 decode_header(parts['to'][0].decode("ascii")),
                 tofield
@@ -168,7 +196,8 @@ class TestMailgun(unittest.TestCase):
             # Now to parse the "message" part of the request, which should be
             # in MIME format representing the email to send
             if six.PY3:
-                m = email.message_from_bytes(parts['message'][0])
+                m = email.message_from_bytes(parts['message'][0],
+                                             policy=email.policy.SMTP)
             else:
                 m = email.message_from_string(parts['message'][0])
             assert isinstance(m, email.message.Message)
@@ -176,13 +205,20 @@ class TestMailgun(unittest.TestCase):
             # We now have an email.message.Message object
 
             # The header fields of the message are native strings on both PY2
-            # and PY3, however, non ASCII characters in a header field will
-            # still be encoded with an RFC 2047 style encoding that we'll
-            # need to process manually with the above decode_header() function.
+            # and PY3, however, on Python 2 non ASCII characters in a header
+            # field will still be encoded with an RFC 2047 style encoding
+            # that we'll need to process manually with the above
+            # decode_header() function. (On Python 3, we use the
+            # email.policy.SMTP decoder which decodes headers for us)
 
-            msgfrom = decode_header(m['From'])
-            msgto = decode_header(m['To'])
-            msgsubject = decode_header(m['Subject'])
+            if six.PY2:
+                msgfrom = decode_header(m['From'])
+                msgto = decode_header(m['To'])
+                msgsubject = decode_header(m['Subject'])
+            else:
+                msgfrom = m['From']
+                msgto = m['To']
+                msgsubject = m['Subject']
 
             self.assertEqual(msgfrom, fromfield)
             self.assertEqual(msgto, tofield)
