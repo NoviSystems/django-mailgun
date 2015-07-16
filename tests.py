@@ -35,9 +35,21 @@ class TestMailgun(unittest.TestCase):
 
     Since we don't want to actually send any email to test the module,
     instead the approach taken is to use httmock to intercept the requests
-    module just before in sends the actual request to the server. We then
+    module just before it sends the actual request to the server. We then
     parse and analyze the outgoing request to see if it looks like a properly
     formed request to the MailGun API containing a properly formed email.
+
+    This is probably overkill and mostly unnecessary, since the mailgun API
+    takes a MIME message, and Django constructs that for us, so there's not
+    much that our mail backend actually does. It just has to make the HTTP
+    request with the proper parameters. However, I still wanted to make sure
+    that the backend passes email properly, and just checking that it didn't
+    raise any errors or that it made *some* request just didn't seem good
+    enough.
+
+    It's more work than it should be mostly because there's a lot to deal
+    with decoding and parsing, and dealing with differences with the decoding
+    and parsing behavior between Python 2 and 3.
     """
 
     def setUp(self):
