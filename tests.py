@@ -150,13 +150,20 @@ class TestMailgun(unittest.TestCase):
             # Now check the form fields. Refer to the MailGun API docs at
             # https://documentation.mailgun.com/api-sending.html#sending
 
-            # fields parsed from the multipart/form-data request are byte
+            # Fields parsed from the multipart/form-data request are byte
             # strings. They need to be decoded to compare to the expected
-            # values in python 3
-            # TODO: is this the right encoding to use? Should it go by the
-            # request's charset? OR can each field in a multipart/form-data
-            # have its own encoding?
-            self.assertEqual(parts['to'][0].decode("ascii"), tofield)
+            # values in python 3. Unicode characters are encoded with RFC
+            # 2047 style encoding, which we decode with this function:
+            def decode_header(h):
+                return " ".join(
+                    decodedbytes.decode(charset)
+                    if charset is not None else decodedbytes
+                    for decodedbytes, charset in email.header.decode_header(h)
+                )
+            self.assertEqual(
+                decode_header(parts['to'][0].decode("ascii")),
+                tofield
+            )
 
             # Now to parse the "message" part of the request, which should be
             # in MIME format representing the email to send
@@ -170,22 +177,9 @@ class TestMailgun(unittest.TestCase):
 
             # The header fields of the message are native strings on both PY2
             # and PY3, however, non ASCII characters in a header field will
-            # cause the field to be encoded with an RFC 2047 style encoding
-            # that we'll need to process manually.
+            # still be encoded with an RFC 2047 style encoding that we'll
+            # need to process manually with the above decode_header() function.
 
-            # PY3 decodes the payload properly to a unicode string if
-            # Content-Transfer-Encoding is 8bit and there is a charset
-            # specified [0], but the PY2 payload gives us a byte string. We'll
-            # need to decode it ourself.
-
-            # [0] https://docs.python.org/3/library/email.message.html#email.message.Message.get_payload
-
-            # First, the headers:
-            def decode_header(h):
-                decodedbytes, charset = email.header.decode_header(h)[0]
-                if charset is None:
-                    return decodedbytes
-                return decodedbytes.decode(charset)
             msgfrom = decode_header(m['From'])
             msgto = decode_header(m['To'])
             msgsubject = decode_header(m['Subject'])
@@ -193,6 +187,13 @@ class TestMailgun(unittest.TestCase):
             self.assertEqual(msgfrom, fromfield)
             self.assertEqual(msgto, tofield)
             self.assertEqual(msgsubject, subject)
+
+            # PY3 decodes the payload properly to a unicode string if
+            # Content-Transfer-Encoding is 8bit and there is a charset
+            # specified [0], but the PY2 payload gives us a byte string. We'll
+            # need to decode it ourself.
+
+            # [0] https://docs.python.org/3/library/email.message.html#email.message.Message.get_payload
 
             if html is None:
                 # A plain text message should be the entirety of the body; an
@@ -229,8 +230,6 @@ class TestMailgun(unittest.TestCase):
 
 
     def test_basic(self):
-
-
         with self.expect([self._make_checker(
             "A subject", "message body", "from@email", "to@email",
         )]):
@@ -318,3 +317,17 @@ class TestMailgun(unittest.TestCase):
                 u"ŭñíçøḑĘ", "message body", "from@email", "to@email",
         )]):
             send_mail(u"ŭñíçøḑĘ", "message body", "from@email", ["to@email"])
+
+    def test_unicode_from(self):
+        with self.expect([self._make_checker(
+                "A subject", "message body", u"frøm <from@email>", "to@email",
+        )]):
+            send_mail("A subject", "message body", u"frøm <from@email>",
+                      ["to@email"])
+
+    def test_unicode_to(self):
+        with self.expect([self._make_checker(
+                "A subject", "message body", "from@email", u"tø <to@email>",
+        )]):
+            send_mail("A subject", "message body", "from@email",
+                      [u"tø <to@email>"])
