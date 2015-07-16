@@ -102,10 +102,19 @@ class TestMailgun(unittest.TestCase):
 
         self.assertEqual(len(checkers), 0, "Expected another email")
 
-    def _make_checker(self, subject, body, fromfield, tofield, html=None):
+    def _make_checker(self, subject, body, fromfield, tofield, html=None,
+                      ccfield=None, bccfield=None):
         """Returns a function that takes a url and a Prepared Request
         and checks that it's a request to the mailgun message.mime endpoint
         specifying the sending of an email with the given parameters
+
+        :param subject: the subject as a text string
+        :param body: the body as a text string
+        :param fromfield: the from address as a text string
+        :param html: the html body as a text string
+        :param tofield: a list of addresses to send to
+        :param ccfield: a list of cc addresses
+        :param bccfield: a list of bcc addresses
 
         """
         def checker(url, request):
@@ -188,10 +197,19 @@ class TestMailgun(unittest.TestCase):
                     else:
                         parts.append(decodedbytes.decode(charset))
                 return " ".join(parts)
-            self.assertEqual(
-                decode_header(parts['to'][0].decode("ascii")),
-                tofield
-            )
+
+            form_to = decode_header(parts['to'][0].decode("ascii")).split(",")
+            form_to = [f.strip() for f in form_to]
+            # Verify that each of the to, cc, and bcc recipients are in this
+            # form field
+            for t in tofield:
+                self.assertIn(t, form_to)
+            if ccfield is not None:
+                for c in ccfield:
+                    self.assertIn(c, form_to)
+            if bccfield is not None:
+                for b in bccfield:
+                    self.assertIn(b, form_to)
 
             # Now to parse the "message" part of the request, which should be
             # in MIME format representing the email to send
@@ -221,8 +239,30 @@ class TestMailgun(unittest.TestCase):
                 msgsubject = m['Subject']
 
             self.assertEqual(msgfrom, fromfield)
-            self.assertEqual(msgto, tofield)
             self.assertEqual(msgsubject, subject)
+
+            msgto = [msgtopart.strip() for msgtopart in msgto.split(",")]
+            for t in tofield:
+                self.assertIn(t, msgto)
+
+            # Now look at the optional cc field. Getting a header
+            # with __getitem__ on a Message returns None if the header
+            # doesn't exist.
+            msgcc = m['cc']
+            if msgcc is None: msgcc = ""
+            if six.PY2:
+                msgcc = decode_header(msgcc)
+            msgcc = [msgccpart.strip() for msgccpart in msgcc.split(",")]
+            if ccfield is not None:
+                for c in ccfield:
+                    self.assertIn(c, msgcc)
+
+            # And check that our bcc recipients are NOT included in any of
+            # the headers
+            if bccfield is not None:
+                for b in bccfield:
+                    self.assertNotIn(b, msgcc)
+                    self.assertNotIn(b, msgto)
 
             # PY3 decodes the payload properly to a unicode string if
             # Content-Transfer-Encoding is 8bit and there is a charset
@@ -266,27 +306,25 @@ class TestMailgun(unittest.TestCase):
 
 
     def test_basic(self):
-        with self.expect([self._make_checker(
-            "A subject", "message body", "from@email", "to@email",
-        )]):
-            send_mail("A subject", "message body", "from@email", ["to@email"])
+        msg = ("A subject", "message body", "from@email", ["to@email"],)
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
 
     def test_two_recp(self):
-        with self.expect([self._make_checker(
-                "A subject", "message body",
-                "from@email", "to@email, second@email",
-        )]):
-            send_mail("A subject", "message body", "from@email", ["to@email",
-                                                                  "second@email"])
+        msg = ("A subject", "message body", "from@email", ["to@email",
+               "second@email"],)
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
+
     def test_two_emails(self):
+        msg1 = ("Subject1", "body one", "from1@email", ["to1@email"])
+        msg2 = ("subject2", "body two", "from2@email", ["to2@email"])
         with self.expect([
-            self._make_checker("Subject1", "body one", "from1@email",
-                               "to1@email"),
-            self._make_checker("subject2", "body two", "from2@email",
-                                "to2@email")
+            self._make_checker(*msg1),
+            self._make_checker(*msg2)
         ]):
-            send_mail("Subject1", "body one", "from1@email", ["to1@email"])
-            send_mail("subject2", "body two", "from2@email", ["to2@email"])
+            send_mail(*msg1)
+            send_mail(*msg2)
 
     def test_no_access_key(self):
         with override_settings():
@@ -322,7 +360,7 @@ class TestMailgun(unittest.TestCase):
 
     def test_html_message(self):
         with self.expect([self._make_checker(
-            "A subject", "plain body", "from@email", "to@email",
+            "A subject", "plain body", "from@email", ["to@email"],
             html="<body>html body</body>",
         )]):
             send_mail("A subject", "plain body", "from@email", ["to@email"],
@@ -334,36 +372,65 @@ class TestMailgun(unittest.TestCase):
             ("subj2", "msg2", "from2", ["to2"]),
         ]
         expects = [
-            self._make_checker("subj1", "msg1", "from1", "to1"),
-            self._make_checker("subj2", "msg2", "from2", "to2"),
+            self._make_checker("subj1", "msg1", "from1", ["to1"]),
+            self._make_checker("subj2", "msg2", "from2", ["to2"]),
         ]
         with self.expect(expects):
             send_mass_mail(messages)
 
     def test_unicode_body(self):
+        msg = ("A subject", u"ŭñíçøḑĘ", "from@email", ["to@email"],)
 
-        with self.expect([self._make_checker(
-                "A subject", u"ŭñíçøḑĘ", "from@email", "to@email",
-        )]):
-            send_mail("A subject", u"ŭñíçøḑĘ", "from@email", ["to@email"])
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
 
     def test_unicode_subject(self):
+        msg = (u"ŭñíçøḑĘ", "message body", "from@email", ["to@email"])
 
-        with self.expect([self._make_checker(
-                u"ŭñíçøḑĘ", "message body", "from@email", "to@email",
-        )]):
-            send_mail(u"ŭñíçøḑĘ", "message body", "from@email", ["to@email"])
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
 
     def test_unicode_from(self):
-        with self.expect([self._make_checker(
-                "A subject", "message body", u"frøm <from@email>", "to@email",
-        )]):
-            send_mail("A subject", "message body", u"frøm <from@email>",
-                      ["to@email"])
+        msg = ("A subject", "message body", u"frøm <from@email>",
+                  ["to@email"])
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
 
     def test_unicode_to(self):
+        msg = ("A subject", "message body", "from@email",
+                  [u"tø <to@email>"])
+        with self.expect([self._make_checker(*msg)]):
+            send_mail(*msg)
+
+    def test_cc(self):
+       msg = django.core.mail.EmailMessage(
+           "Subject", "body", "from@email", ["to@email"],
+           cc=["cc@email"]
+       )
+       with self.expect([self._make_checker(
+               "Subject", "body", "from@email", ["to@email"],
+               ccfield=["cc@email"]
+       )]):
+           msg.send()
+
+    def test_bcc(self):
+        msg = django.core.mail.EmailMessage(
+            "Subject", "body", "from@email", ["to@email"],
+            bcc=["bcc@email"]
+        )
         with self.expect([self._make_checker(
-                "A subject", "message body", "from@email", u"tø <to@email>",
+                "Subject", "body", "from@email", ["to@email"],
+                bccfield=["bcc@email"]
         )]):
-            send_mail("A subject", "message body", "from@email",
-                      [u"tø <to@email>"])
+            msg.send()
+
+    def test_cc_and_bcc(self):
+        msg = django.core.mail.EmailMessage(
+            "Subject", "body", "from@email", ["to@email"],
+            cc=["cc@email"], bcc=["bcc@email"]
+        )
+        with self.expect([self._make_checker(
+                "Subject", "body", "from@email", ["to@email"],
+                ccfield=["cc@email"], bccfield=["bcc@email"]
+        )]):
+            msg.send()
